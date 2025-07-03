@@ -1,0 +1,17 @@
+<launch>
+
+  <node pkg="ins570d-ros-driver" type="ins570d_node" name="ins570d_node" required="true" output="screen">
+    <param name="port" value="/dev/ttyUSB0"/>
+    <param name="buadrate" type="int" value="230400"/>
+    <param name="frame_id" type="str" value="base_link"/>
+    <param name="broadcast_tf" type="bool" value="true"/>
+    <param name="tf_parent_frame_id" type="str" value="world"/>
+    <param name="tf_frame_id" type="str" value="base_link"/>
+    <!--周内秒加每个周的偏移量，需要根据每个月的不同天数进行调整 605000-200-->
+    <param name="Offset_time" type="int" value="1725753600"/>
+    <param name="UTC_Offset_time" type="int" value="18"/>
+  </node>
+
+  <!-- <node pkg="rviz" type="rviz" name="rviz" args="-d $(find ins570d)/rviz/demo.rviz" required="true"/> -->
+
+</launch>
