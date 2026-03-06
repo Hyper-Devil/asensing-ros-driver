@@ -1,6 +1,6 @@
 <launch>
 
-  <node pkg="ins570d-ros-driver" type="ins570d_node" name="ins570d_node" required="true" output="screen">
+  <node pkg="asensing-ros-driver" type="asensing_node" name="asensing_node" required="true" output="screen">
     <param name="port" value="/dev/ttyUSB0"/>
     <param name="buadrate" type="int" value="230400"/>
     <param name="frame_id" type="str" value="base_link"/>
@@ -12,6 +12,6 @@
     <param name="UTC_Offset_time" type="int" value="18"/>
   </node>
 
-  <!-- <node pkg="rviz" type="rviz" name="rviz" args="-d $(find ins570d)/rviz/demo.rviz" required="true"/> -->
+  <!-- <node pkg="rviz" type="rviz" name="rviz" args="-d $(find asensing)/rviz/demo.rviz" required="true"/> -->
 
 </launch>

@@ -66,11 +66,11 @@ int main(int argc, char **argv)
   tf::Quaternion orientation;
   tf::Quaternion zero_orientation;
 
-  ros::init(argc, argv, "INS570D");
+  ros::init(argc, argv, "asensing");
 
   ros::NodeHandle private_node_handle("~");
   private_node_handle.param<std::string>("port", port, "/dev/ttyUSB0");
-  private_node_handle.param<int>("buadrate", buadrate, 460800);
+  private_node_handle.param<int>("buadrate", buadrate, 230400);
   private_node_handle.param<std::string>("tf_parent_frame_id",
                                          tf_parent_frame_id, "world");
   private_node_handle.param<std::string>("tf_frame_id", tf_frame_id,
@@ -125,7 +125,10 @@ int main(int argc, char **argv)
   ros::Duration time_offset;
   ros::Time gpsRosTime;
 
-  static tf::TransformBroadcaster tf_br;
+  tf::TransformBroadcaster* tf_br = nullptr;
+  if (broadcast_tf) {
+    tf_br = new tf::TransformBroadcaster();
+  }
   tf::Transform transform;
   transform.setOrigin(tf::Vector3(0, 0, 0));
 
@@ -448,11 +451,11 @@ int main(int argc, char **argv)
                   //}
 
                   // publish tf transform
-                  // if (broadcast_tf)
+                  // if (broadcast_tf && tf_br)
                   // {
                   //   // transform.setRotation(differential_rotation);
                   //   transform.setRotation(orientation);
-                  //   tf_br.sendTransform(
+                  //   tf_br->sendTransform(
                   //       tf::StampedTransform(transform, measurement_time,
                   //                            tf_parent_frame_id, tf_frame_id));
                   // }

@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package>
-  <name>ins570d-ros-driver</name>
+  <name>asensing-ros-driver</name>
   <version>0.0.2</version>
-  <description>The ins570d package</description>
+  <description>The asensing package</description>
 
   <!-- One maintainer tag required, multiple allowed, one person per tag --> 
   <!-- Example:  -->

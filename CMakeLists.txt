@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ins570d-ros-driver)
+project(asensing-ros-driver)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -44,15 +44,15 @@ include_directories(
 
 ## Declare a C++ executable
 
-add_executable(ins570d_node src/ins570d_node.cpp)
+add_executable(asensing_node src/main.cpp)
 ## Specify libraries to link a library or executable target against
 
-target_link_libraries(ins570d_node
+target_link_libraries(asensing_node
   ${catkin_LIBRARIES}
 )
 
 ## Mark executables and/or libraries for installation
-install(TARGETS ins570d_node
+install(TARGETS asensing_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
