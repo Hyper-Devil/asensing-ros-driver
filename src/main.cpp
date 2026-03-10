@@ -4,14 +4,14 @@
 #include <ros/ros.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/NavSatFix.h>
-#include <sensor_msgs/Temperature.h>
 #include <sensor_msgs/TimeReference.h>
 #include <serial/serial.h>
+#include <std_msgs/Float32.h>
 #include <std_msgs/String.h>
+#include <std_msgs/UInt8.h>
 #include <std_srvs/Empty.h>
 #include <string>
-#include <tf/transform_broadcaster.h>
-#include <tf/transform_datatypes.h>
+#include <cmath>
 
 bool zero_orientation_set = false;
 
@@ -49,50 +49,40 @@ int main(int argc, char **argv)
   serial::Serial ser;
   std::string port;
   int buadrate;
-  std::string tf_parent_frame_id;
-  std::string tf_frame_id;
   std::string frame_id;
+  std::string device_model;
   double time_offset_in_seconds;
-  bool broadcast_tf;
-  double linear_acceleration_stddev;
-  double angular_velocity_stddev;
-  double orientation_stddev;
+  double gravity_acceleration;
+  bool use_gps_time;
   uint8_t last_received_message_number;
   bool received_message = false;
   int data_packet_start;
   int Offset_time;     // 周内秒加每个月的偏移量，需要根据每个月的不同天数进行调整
   int UTC_Offset_time; // gps周内秒转UTC或在北京时间的偏移量
 
-  tf::Quaternion orientation;
-  tf::Quaternion zero_orientation;
-
   ros::init(argc, argv, "asensing");
 
   ros::NodeHandle private_node_handle("~");
   private_node_handle.param<std::string>("port", port, "/dev/ttyUSB0");
   private_node_handle.param<int>("buadrate", buadrate, 230400);
-  private_node_handle.param<std::string>("tf_parent_frame_id",
-                                         tf_parent_frame_id, "world");
-  private_node_handle.param<std::string>("tf_frame_id", tf_frame_id,
-                                         "base_link");
   private_node_handle.param<std::string>("frame_id", frame_id, "imu_link");
+  private_node_handle.param<std::string>("device_model", device_model,
+                                         "ins570d");
   private_node_handle.param<double>("time_offset_in_seconds",
                                     time_offset_in_seconds, 0.0);
-  private_node_handle.param<bool>("broadcast_tf", broadcast_tf, true);
-  private_node_handle.param<double>("linear_acceleration_stddev",
-                                    linear_acceleration_stddev, 0.0);
-  private_node_handle.param<double>("angular_velocity_stddev",
-                                    angular_velocity_stddev, 0.0);
-  private_node_handle.param<double>("orientation_stddev", orientation_stddev,
-                                    0.0);
+  private_node_handle.param<double>("gravity_acceleration",
+                                    gravity_acceleration, 9.7883105);
+  private_node_handle.param<bool>("use_gps_time", use_gps_time, false);
   private_node_handle.param<int>("Offset_time", Offset_time, 0);         // 周内秒加每个月的偏移量，需要根据每个月的不同天数进行调整
   private_node_handle.param<int>("UTC_Offset_time", UTC_Offset_time, 0); // gps周内秒转UTC或在北京时间的偏移量
 
+  ROS_INFO_STREAM("Device model: " << device_model);
+
   ros::NodeHandle nh("imu");
   ros::Publisher imu_pub = nh.advertise<sensor_msgs::Imu>("data", 200);
-  ros::Publisher imu_temperature_pub =
-      nh.advertise<sensor_msgs::Temperature>("temperature", 200);
   ros::Publisher imu_gps_pub = nh.advertise<sensor_msgs::NavSatFix>("gps", 200);
+  ros::Publisher temp_pub = nh.advertise<std_msgs::Float32>("temperature", 200);
+  ros::Publisher sat_pub = nh.advertise<std_msgs::UInt8>("satellites", 200);
   // ros::Publisher trigger_time_pub =
   //     nh.advertise<sensor_msgs::TimeReference>("trigger_time", 100);
 
@@ -102,35 +92,19 @@ int main(int argc, char **argv)
   ros::Rate r(300); // 200 hz
 
   sensor_msgs::Imu imu;
-
-  imu.linear_acceleration_covariance[0] = linear_acceleration_stddev;
-  imu.linear_acceleration_covariance[4] = linear_acceleration_stddev;
-  imu.linear_acceleration_covariance[8] = linear_acceleration_stddev;
-
-  imu.angular_velocity_covariance[0] = angular_velocity_stddev;
-  imu.angular_velocity_covariance[4] = angular_velocity_stddev;
-  imu.angular_velocity_covariance[8] = angular_velocity_stddev;
-
-  imu.orientation_covariance[0] = orientation_stddev;
-  imu.orientation_covariance[4] = orientation_stddev;
-  imu.orientation_covariance[8] = orientation_stddev;
+  imu.orientation_covariance[0] = -1.0;
+  imu.angular_velocity_covariance[0] = -1.0;
+  imu.linear_acceleration_covariance[0] = -1.0;
 
   sensor_msgs::TimeReference trigger_time_msg; ////
-  sensor_msgs::Temperature temperature_msg;
   sensor_msgs::NavSatFix gps_msg;
-  temperature_msg.variance = 0;
-  gps_msg.position_covariance_type = 0; // COVARIANCE_TYPE_UNKNOWN
+  gps_msg.position_covariance_type = sensor_msgs::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+  gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_NO_FIX;
+  gps_msg.status.service = sensor_msgs::NavSatStatus::SERVICE_GPS;
 
   bool UseTime = false;
   ros::Duration time_offset;
   ros::Time gpsRosTime;
-
-  tf::TransformBroadcaster* tf_br = nullptr;
-  if (broadcast_tf) {
-    tf_br = new tf::TransformBroadcaster();
-  }
-  tf::Transform transform;
-  transform.setOrigin(tf::Vector3(0, 0, 0));
 
   std::string input;
   std::string read;
@@ -167,7 +141,7 @@ int main(int argc, char **argv)
             {
               if (input.find(0x0B) - data_packet_start == 2 && input.find(0xDB) - data_packet_start == 1)
               {
-                ROS_INFO("Found possible start of data packet at position %d", data_packet_start);
+                // ROS_INFO("Found possible start of data packet at position %d", data_packet_start);
                 xorcheck = 0;
                 // std::string pack;
                 for (int i = 0; i < Length - 1; i++)
@@ -180,7 +154,6 @@ int main(int argc, char **argv)
                 if (input[data_packet_start + Length - 1] == xorcheck)
                 {
                   // ROS_DEBUG("seems to be a real data package: long enough and
-                  // found end characters");95
                   // printf("initialDATA:%x \n",input[data_packet_start+2]);
 
                   // get RPY
@@ -195,7 +168,7 @@ int main(int argc, char **argv)
                       (0xff & (char)input[data_packet_start + 7]);
 
                   // calculate RPY in rad
-                  // 将y右z下转y左z上 * -1.0
+                  // 只有这里需要。将y右z下转y左z上 * -1.0
                   short int *temp = (short int *)&roll;
                   float rollf = (*temp) * (360.0 / 32768) * (M_PI / 180.0);
                   temp = (short int *)&pitch;
@@ -221,13 +194,13 @@ int main(int argc, char **argv)
                       ((0xff & (char)input[data_packet_start + 14]) << 8) |
                       (0xff & (char)input[data_packet_start + 13]);
                   // cal unit from deg/s to rad/s
-                  // 将y右z下转y左z上 * -1.0
+                  // 取消。将y右z下转y左z上 * -1.0
                   temp = (short int *)&gx;
                   float gxf = (*temp) * 300.0 / 32768 * (M_PI / 180.0);
                   temp = (short int *)&gy;
-                  float gyf = (*temp) * 300.0 / 32768 * (M_PI / 180.0) * -1.0;
+                  float gyf = (*temp) * 300.0 / 32768 * (M_PI / 180.0) ;//* -1.0;
                   temp = (short int *)&gz;
-                  float gzf = (*temp) * 300.0 / 32768 * (M_PI / 180.0) * -1.0;
+                  float gzf = (*temp) * 300.0 / 32768 * (M_PI / 180.0) ;//* -1.0;
 
                   // get acelerometer values
                   short int ax =
@@ -243,11 +216,11 @@ int main(int argc, char **argv)
                   // calculate accelerations unit from g to m/s²
                   // 将y右z下转y左z上 * -1.0
                   temp = (short int *)&ax;
-                  float axf = *temp * 12.0 / 32768 * 9.80665;
+                  float axf = *temp * 12.0 / 32768 * gravity_acceleration;
                   temp = (short int *)&ay;
-                  float ayf = *temp * 12.0 / 32768 * 9.80665 * -1.0;
+                  float ayf = *temp * 12.0 / 32768 * gravity_acceleration ; //* -1.0;
                   temp = (short int *)&az;
-                  float azf = *temp * 12.0 / 32768 * 9.80665 * -1.0;
+                  float azf = *temp * 12.0 / 32768 * gravity_acceleration ; //* -1.0;
 
                   // get gps values
                   int latitude =
@@ -303,34 +276,78 @@ int main(int argc, char **argv)
 
                   // 计算 GPS 时间（单位：秒）
                   double gpsTimeMilliseconds = gpsTime * 0.00025;
-                  // ROS_INFO("Time:%f", gpsTimeMilliseconds);
-                  //  int32_t secs = static_cast<int32_t>(gpsTimeMilliseconds);                 // 提取整数秒部分
-                  //  int32_t nsecs = static_cast<int32_t>((gpsTimeMilliseconds - secs) * 1e9); // 计算纳秒部分
 
-                  // secs = secs + Offset_time - UTC_Offset_time; // 周内秒加每个月的偏移量，需要根据每个月的不同天数进行调整
 
-                  // 创建一个 ros::Time 对象并手动设置秒数和纳秒数
-                  // gpsRosTime.sec = static_cast<uint32_t>(secs);
-                  // gpsRosTime.nsec = static_cast<uint32_t>(nsecs);
+                  char type = (0xff & (char)input[data_packet_start + 56]);
+                  int16_t Data1 =
+                      ((0xff & (char)input[data_packet_start + 47]) << 8) |
+                      (0xff & (char)input[data_packet_start + 46]);
+                  int16_t Data2 =
+                      ((0xff & (char)input[data_packet_start + 49]) << 8) |
+                      (0xff & (char)input[data_packet_start + 48]);
+                  int16_t Data3 =
+                      ((0xff & (char)input[data_packet_start + 51]) << 8) |
+                      (0xff & (char)input[data_packet_start + 50]);
 
-                  // if (UseTime == false)
-                  // {
-                  //   time_offset = ros::Time::now() - gpsRosTime;
-                  //   UseTime = true;
-                  // }
-
-                  char polling = (0xff & (char)input[data_packet_start + 56]);
-                  double temperaturef;
-                  if (polling == 22)
+                  switch (type)
                   {
-                    // short int temperature =
-                    //     ((0xff & (char)input[data_packet_start + 47]) << 8) |
-                    //     (0xff & (char)input[data_packet_start + 46]);
+                  case 0:
+                  {
+                    const double lat_std = std::exp(Data1 / 100.0);
+                    const double lon_std = std::exp(Data2 / 100.0);
+                    const double alt_std = std::exp(Data3 / 100.0);
+                    gps_msg.position_covariance[0] = lon_std * lon_std;
+                    gps_msg.position_covariance[1] = 0.0;
+                    gps_msg.position_covariance[2] = 0.0;
+                    gps_msg.position_covariance[3] = 0.0;
+                    gps_msg.position_covariance[4] = lat_std * lat_std;
+                    gps_msg.position_covariance[5] = 0.0;
+                    gps_msg.position_covariance[6] = 0.0;
+                    gps_msg.position_covariance[7] = 0.0;
+                    gps_msg.position_covariance[8] = alt_std * alt_std;
+                    gps_msg.position_covariance_type = sensor_msgs::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
+                    break;
+                  }
+                  case 22:
+                  {
+                    std_msgs::Float32 temp_msg;
+                    temp_msg.data = Data1 * 200.0f / 32768.0f;
+                    temp_pub.publish(temp_msg);
+                    break;
+                  }
+                  case 32:
+                  {
+                    switch (Data1)
+                    {
+                    case 0:
+                      gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_NO_FIX;
+                      break;
+                    case 16:
+                      gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_FIX;
+                      break;
+                    case 18:
+                      gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_SBAS_FIX;
+                      break;
+                    case 17:
+                    case 32:
+                    case 33:
+                    case 34:
+                    case 48:
+                    case 49:
+                    case 50:
+                      gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_GBAS_FIX;
+                      break;
+                    default:
+                      break;
+                    }
 
-                    // temp = (short int *)&temperature;
-                    // temperaturef = (*temp) * 200 / 32768;
-
-                    // ROS_INFO("temperature: %f", temperaturef);
+                    std_msgs::UInt8 sat_msg;
+                    sat_msg.data = static_cast<uint8_t>(Data2);
+                    sat_pub.publish(sat_msg);
+                    break;
+                  }
+                  default:
+                    break;
                   }
 
                   received_message = true;
@@ -341,56 +358,36 @@ int main(int argc, char **argv)
                       ((0xff & (char)input[data_packet_start + 59]) << 8) |
                       (0xff & (char)input[data_packet_start + 58]);
 
-                  // calc gps time
-                  // ros::Time measurement_time = convertGPSTimeToROSTime(gpsWeek, gpsTimeMilliseconds);
-                  // time_offset = ros::Time::now() - measurement_time;
-                  // ROS_INFO_STREAM("Time offset: " << time_offset.toSec());
+                    ros::Time measurement_time =
+                      ros::Time::now() + ros::Duration(time_offset_in_seconds);
+                    if (use_gps_time && gpsWeek > 0)
+                    {
+                    measurement_time =
+                      convertGPSTimeToROSTime((int)gpsWeek, gpsTimeMilliseconds) +
+                      ros::Duration(time_offset_in_seconds);
+                    }
 
-                  // calculate measurement time
-                  // 无GPS时对准时间
-                  // ros::Time measurement_time = gpsRosTime + time_offset;
-                  // 有GPS时使用GPS时间
-                  // ros::Time measurement_time = gpsRosTime;
-                  // ROS_INFO("Time_gps:%f", gpsRosTime.toSec());
-                  // ROS_INFO("Time_sys:%f", ros::Time::now().toSec());
-                  // ros::Time::now() + ros::Duration(time_offset_in_seconds);
+                  const double cr = std::cos(rollf * 0.5);
+                  const double sr = std::sin(rollf * 0.5);
+                  const double cp = std::cos(pitchf * 0.5);
+                  const double sp = std::sin(pitchf * 0.5);
+                  const double cy = std::cos(yawf * 0.5);
+                  const double sy = std::sin(yawf * 0.5);
 
-                  // tf::Quaternion orientation(xf, yf, zf, wf);
-                  tf::Quaternion orientation;
-                  // orientation = tf::createQuaternionFromRPY(rollf, pitchf, yawf);
-                  orientation.setRPY(rollf, pitchf, yawf);
+                  geometry_msgs::Quaternion orientation;
+                  orientation.w = cr * cp * cy + sr * sp * sy;
+                  orientation.x = sr * cp * cy - cr * sp * sy;
+                  orientation.y = cr * sp * cy + sr * cp * sy;
+                  orientation.z = cr * cp * sy - sr * sp * cy;
                   ROS_INFO_STREAM("in degree::rollf: " << rollf * 180 / M_PI << " pitchf: " << pitchf * 180 / M_PI << " yawf: " << yawf * 180 / M_PI);
-                  imu.orientation.x = orientation.x();
-                  imu.orientation.y = orientation.y();
-                  imu.orientation.z = orientation.z();
-                  imu.orientation.w = orientation.w();
+                  imu.orientation.x = orientation.x;
+                  imu.orientation.y = orientation.y;
+                  imu.orientation.z = orientation.z;
+                  imu.orientation.w = orientation.w;
 
-                  // if (!zero_orientation_set) {
-                  //   zero_orientation = orientation;
-                  //   zero_orientation_set = true;
-                  // }
-
-                  // // http://answers.ros.org/question/10124/relative-rotation-between-two-quaternions/
-                  // tf::Quaternion differential_rotation;
-                  // differential_rotation =
-                  //     zero_orientation.inverse() * orientation;
-
-                  // publish imu message
-                  // imu.header.stamp = measurement_time;
-                  imu.header.stamp = ros::Time::now();
-                  // if (oldtime == measurement_time)
-                  // {
-                  //   digit++;
-                  // }
-                  // else
-                  // {
-                  //   // std::cout << digit << std::endl;
-                  //   digit = 1;
-                  //   oldtime = measurement_time;
-                  // }
+                  imu.header.stamp = measurement_time;
                   imu.header.frame_id = frame_id;
 
-                  // quaternionTFToMsg(orientation, imu.orientation);
 
                   imu.angular_velocity.x = gxf;
                   imu.angular_velocity.y = gyf;
@@ -402,64 +399,23 @@ int main(int argc, char **argv)
 
                   imu_pub.publish(imu);
 
-                  // publish temperature message
-                  // temperature_msg.header.stamp = measurement_time;
-                  temperature_msg.header.stamp = ros::Time::now();
-                  temperature_msg.header.frame_id = frame_id;
-                  temperature_msg.temperature = temperaturef;
-
-                  imu_temperature_pub.publish(temperature_msg);
-
-                  // publish gps message
-                  // if(time_offset < 600) //600s
-                  // {
-                  //   gps_msg.header.stamp = measurement_time;
-                  // }
-                  // else
-                  // {
-                  //   gps_msg.header.stamp = ros::Time::now();
-                  // }
-                  gps_msg.header.stamp = ros::Time::now();
+                  gps_msg.header.stamp = measurement_time;
                   gps_msg.header.frame_id = "world";
-                  gps_msg.position_covariance[0] = 0.0;
-                  gps_msg.position_covariance[4] = 0.0;
-                  gps_msg.position_covariance[8] = 0.0;
-                  gps_msg.position_covariance_type = 0;
-                  if ((gps_msg.longitude != 0.0 && gps_msg.latitude != 0.0) &&
-                      (abs(gps_msg.altitude - altitudef) > 20 ||
-                       abs(gps_msg.longitude - longitudef) > 20 ||
-                       abs(gps_msg.latitude - latitudef) > 20))
-                  {
-                    input.erase(0, data_packet_start + 1);
-                    continue;
-                  }
-                  else
+                  bool gps_jumped = (gps_msg.longitude != 0.0 && gps_msg.latitude != 0.0) &&
+                                    (std::abs(gps_msg.altitude - altitudef) > 20.0 ||
+                                     std::abs(gps_msg.longitude - longitudef) > 20.0 ||
+                                     std::abs(gps_msg.latitude - latitudef) > 20.0);
+                  if (!gps_jumped)
                   {
                     gps_msg.latitude = latitudef;
                     gps_msg.longitude = longitudef;
                     gps_msg.altitude = altitudef;
                     imu_gps_pub.publish(gps_msg);
                   }
-                  // publish triggertime message
-                  // if (1) { // triggerCounter != lastTriggerCounter
-                  // ros::Time time_ref(0, 0);
-                  // trigger_time_msg.header.frame_id = frame_id;
-                  // trigger_time_msg.header.stamp = measurement_time;
-                  // trigger_time_msg.time_ref = time_ref;
-                  // trigger_time_pub.publish(trigger_time_msg);
-                  // lastTriggerCounter = triggerCounter;
-                  //}
-
-                  // publish tf transform
-                  // if (broadcast_tf && tf_br)
-                  // {
-                  //   // transform.setRotation(differential_rotation);
-                  //   transform.setRotation(orientation);
-                  //   tf_br->sendTransform(
-                  //       tf::StampedTransform(transform, measurement_time,
-                  //                            tf_parent_frame_id, tf_frame_id));
-                  // }
-                  // outfile<<pack<<std::endl; // write package into output file
+                  else
+                  {
+                    ROS_WARN_THROTTLE(1.0, "GPS data jumped. Skipping publication for this frame.");
+                  }
                 }
                 else
                 {
