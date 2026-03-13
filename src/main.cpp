@@ -51,14 +51,11 @@ int main(int argc, char **argv)
   int buadrate;
   std::string frame_id;
   std::string device_model;
-  double time_offset_in_seconds;
   double gravity_acceleration;
   bool use_gps_time;
   uint8_t last_received_message_number;
   bool received_message = false;
   int data_packet_start;
-  int Offset_time;     // 周内秒加每个月的偏移量，需要根据每个月的不同天数进行调整
-  int UTC_Offset_time; // gps周内秒转UTC或在北京时间的偏移量
 
   ros::init(argc, argv, "asensing");
 
@@ -68,13 +65,9 @@ int main(int argc, char **argv)
   private_node_handle.param<std::string>("frame_id", frame_id, "imu_link");
   private_node_handle.param<std::string>("device_model", device_model,
                                          "ins570d");
-  private_node_handle.param<double>("time_offset_in_seconds",
-                                    time_offset_in_seconds, 0.0);
   private_node_handle.param<double>("gravity_acceleration",
                                     gravity_acceleration, 9.7883105);
   private_node_handle.param<bool>("use_gps_time", use_gps_time, false);
-  private_node_handle.param<int>("Offset_time", Offset_time, 0);         // 周内秒加每个月的偏移量，需要根据每个月的不同天数进行调整
-  private_node_handle.param<int>("UTC_Offset_time", UTC_Offset_time, 0); // gps周内秒转UTC或在北京时间的偏移量
 
   ROS_INFO_STREAM("Device model: " << device_model);
 
@@ -198,9 +191,9 @@ int main(int argc, char **argv)
                   temp = (short int *)&gx;
                   float gxf = (*temp) * 300.0 / 32768 * (M_PI / 180.0);
                   temp = (short int *)&gy;
-                  float gyf = (*temp) * 300.0 / 32768 * (M_PI / 180.0) ;//* -1.0;
+                  float gyf = (*temp) * 300.0 / 32768 * (M_PI / 180.0); //* -1.0;
                   temp = (short int *)&gz;
-                  float gzf = (*temp) * 300.0 / 32768 * (M_PI / 180.0) ;//* -1.0;
+                  float gzf = (*temp) * 300.0 / 32768 * (M_PI / 180.0); //* -1.0;
 
                   // get acelerometer values
                   short int ax =
@@ -218,9 +211,9 @@ int main(int argc, char **argv)
                   temp = (short int *)&ax;
                   float axf = *temp * 12.0 / 32768 * gravity_acceleration;
                   temp = (short int *)&ay;
-                  float ayf = *temp * 12.0 / 32768 * gravity_acceleration ; //* -1.0;
+                  float ayf = *temp * 12.0 / 32768 * gravity_acceleration; //* -1.0;
                   temp = (short int *)&az;
-                  float azf = *temp * 12.0 / 32768 * gravity_acceleration ; //* -1.0;
+                  float azf = *temp * 12.0 / 32768 * gravity_acceleration; //* -1.0;
 
                   // get gps values
                   int latitude =
@@ -276,7 +269,6 @@ int main(int argc, char **argv)
 
                   // 计算 GPS 时间（单位：秒）
                   double gpsTimeMilliseconds = gpsTime * 0.00025;
-
 
                   char type = (0xff & (char)input[data_packet_start + 56]);
                   int16_t Data1 =
@@ -358,14 +350,12 @@ int main(int argc, char **argv)
                       ((0xff & (char)input[data_packet_start + 59]) << 8) |
                       (0xff & (char)input[data_packet_start + 58]);
 
-                    ros::Time measurement_time =
-                      ros::Time::now() + ros::Duration(time_offset_in_seconds);
-                    if (use_gps_time && gpsWeek > 0)
-                    {
+                  ros::Time measurement_time = ros::Time::now();
+                  if (use_gps_time && gpsWeek > 0 && gpsTimeMilliseconds > 0)
+                  {
                     measurement_time =
-                      convertGPSTimeToROSTime((int)gpsWeek, gpsTimeMilliseconds) +
-                      ros::Duration(time_offset_in_seconds);
-                    }
+                        convertGPSTimeToROSTime((int)gpsWeek, gpsTimeMilliseconds);
+                  }
 
                   const double cr = std::cos(rollf * 0.5);
                   const double sr = std::sin(rollf * 0.5);
@@ -379,7 +369,7 @@ int main(int argc, char **argv)
                   orientation.x = sr * cp * cy - cr * sp * sy;
                   orientation.y = cr * sp * cy + sr * cp * sy;
                   orientation.z = cr * cp * sy - sr * sp * cy;
-                  ROS_INFO_STREAM("in degree::rollf: " << rollf * 180 / M_PI << " pitchf: " << pitchf * 180 / M_PI << " yawf: " << yawf * 180 / M_PI);
+                  ROS_INFO_STREAM("In degree::rollf: " << rollf * 180 / M_PI << " pitchf: " << pitchf * 180 / M_PI << " yawf: " << yawf * 180 / M_PI);
                   imu.orientation.x = orientation.x;
                   imu.orientation.y = orientation.y;
                   imu.orientation.z = orientation.z;
@@ -387,7 +377,6 @@ int main(int argc, char **argv)
 
                   imu.header.stamp = measurement_time;
                   imu.header.frame_id = frame_id;
-
 
                   imu.angular_velocity.x = gxf;
                   imu.angular_velocity.y = gyf;
