@@ -12,12 +12,63 @@
 #include <std_srvs/Empty.h>
 #include <string>
 #include <cmath>
+#include <cstdint>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 bool zero_orientation_set = false;
 
 ros::Time oldtime;
 
 int digit = 1;
+
+std::string type32DiffStatusToString(int status)
+{
+  switch (status)
+  {
+  case 0:
+    return "NONE";
+  case 1:
+    return "FIXEDPOS";
+  case 2:
+    return "FIXEDHEIGHT";
+  case 8:
+    return "DOPPLER_VELOCITY";
+  case 16:
+    return "SINGLE";
+  case 17:
+    return "PSRDIFF";
+  case 18:
+    return "SBAS";
+  case 32:
+    return "L1_FLOAT";
+  case 33:
+    return "IONOFREE_FLOAT";
+  case 34:
+    return "NARROW_FLOAT";
+  case 48:
+    return "L1_INT";
+  case 49:
+    return "WIDE_INT";
+  case 50:
+    return "NARROW_INT";
+  default:
+    return "UNKNOWN(" + std::to_string(status) + ")";
+  }
+}
+
+std::string formatRosTimeUTC(const ros::Time &t)
+{
+  const time_t sec = static_cast<time_t>(t.sec);
+  std::tm tm_utc;
+  gmtime_r(&sec, &tm_utc);
+
+  std::ostringstream oss;
+  oss << std::put_time(&tm_utc, "%Y-%m-%d %H:%M:%S") << "."
+      << std::setw(3) << std::setfill('0') << (t.nsec / 1000000) << " UTC";
+  return oss.str();
+}
 
 bool set_zero_orientation(std_srvs::Empty::Request &,
                           std_srvs::Empty::Response &)
@@ -53,8 +104,7 @@ int main(int argc, char **argv)
   std::string device_model;
   double gravity_acceleration;
   bool use_gps_time;
-  uint8_t last_received_message_number;
-  bool received_message = false;
+  bool debug_display;
   int data_packet_start;
 
   ros::init(argc, argv, "asensing");
@@ -68,43 +118,44 @@ int main(int argc, char **argv)
   private_node_handle.param<double>("gravity_acceleration",
                                     gravity_acceleration, 9.7883105);
   private_node_handle.param<bool>("use_gps_time", use_gps_time, false);
+  private_node_handle.param<bool>("debug_display", debug_display, false);
 
   ROS_INFO_STREAM("Device model: " << device_model);
 
   ros::NodeHandle nh("imu");
-  ros::Publisher imu_pub = nh.advertise<sensor_msgs::Imu>("data", 200);
-  ros::Publisher imu_gps_pub = nh.advertise<sensor_msgs::NavSatFix>("gps", 200);
-  ros::Publisher temp_pub = nh.advertise<std_msgs::Float32>("temperature", 200);
-  ros::Publisher sat_pub = nh.advertise<std_msgs::UInt8>("satellites", 200);
+  // Use small publish queues to prefer fresh data and reduce end-to-end latency.
+  ros::Publisher imu_pub = nh.advertise<sensor_msgs::Imu>("data", 10);
+  ros::Publisher imu_gps_pub = nh.advertise<sensor_msgs::NavSatFix>("gps", 10);
+  ros::Publisher temp_pub = nh.advertise<std_msgs::Float32>("temperature", 10);
+  ros::Publisher sat_pub = nh.advertise<std_msgs::UInt8>("satellites", 10);
 
   ros::ServiceServer service =
       nh.advertiseService("set_zero_orientation", set_zero_orientation);
 
-  ros::Rate r(300); // 300 hz
+  ros::Rate r(1000); // Higher polling rate lowers serial-read scheduling latency.
 
   sensor_msgs::Imu imu;
   imu.orientation_covariance[0] = -1.0;
   imu.angular_velocity_covariance[0] = -1.0;
   imu.linear_acceleration_covariance[0] = -1.0;
 
-  sensor_msgs::TimeReference trigger_time_msg; 
   sensor_msgs::NavSatFix gps_msg;
   gps_msg.position_covariance_type = sensor_msgs::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
   gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_NO_FIX;
   gps_msg.status.service = sensor_msgs::NavSatStatus::SERVICE_GPS;
 
-  bool UseTime = false;
-  ros::Duration time_offset;
-  ros::Time gpsRosTime;
-
   std::string input;
   std::string read;
   zero_orientation_set = false;
-  double long i = 0;
-  char xorcheck = 0;
+  uint8_t xorcheck = 0;
+
+  uint8_t last_sat_count = 0;
+  int type32_diff_pos_status = 0;
+  int type32_diff_heading_status = 0;
+  bool type32_updated_this_frame = false;
   
-  // 【修复】数据包总长度修正为 88 字节
-  int Length = 88; 
+  const int kLength88 = 88;
+  const int kLength63 = 63;
   
   while (ros::ok())
   {
@@ -119,23 +170,79 @@ int main(int argc, char **argv)
                     (int)read.size(), (int)input.size());
           input += read;
           
-          while (input.length() >= Length)
+          while (input.length() >= 3)
           {
-            data_packet_start = input.find(0xBD);
+            data_packet_start = input.find(static_cast<char>(0xBD));
 
             if (data_packet_start != std::string::npos)
             {
-              if (input.find(0x0B) - data_packet_start == 2 && input.find(0xDB) - data_packet_start == 1)
+              // Drop bytes before candidate header to keep parser aligned.
+              if (data_packet_start > 0)
               {
-                xorcheck = 0;
-                // 全帧异或校验 (0 ~ 86 字节)
-                for (int i = 0; i < Length - 1; i++)
+                input.erase(0, data_packet_start);
+              }
+
+              // 防越界: at least 63 bytes are required to start frame validation.
+              if (input.length() < static_cast<size_t>(kLength63))
+              {
+                break;
+              }
+
+              // Strict contiguous header check: 0xBD 0xDB 0x0B at offsets 0/1/2.
+              if ((static_cast<uint8_t>(input[0]) == 0xBD) &&
+                  (static_cast<uint8_t>(input[1]) == 0xDB) &&
+                  (static_cast<uint8_t>(input[2]) == 0x0B))
+              {
+                data_packet_start = 0;
+                auto frameXorValid = [&](int frame_length) -> bool {
+                  if (input.length() < static_cast<size_t>(frame_length))
+                  {
+                    return false;
+                  }
+                  xorcheck = 0;
+                  for (int i = 0; i < frame_length - 1; i++)
+                  {
+                    xorcheck = xorcheck ^ static_cast<uint8_t>(input[data_packet_start + i]);
+                  }
+                  return static_cast<uint8_t>(input[data_packet_start + frame_length - 1]) == xorcheck;
+                };
+
+                int frame_length = 0;
+                if (input.length() >= static_cast<size_t>(kLength88))
                 {
-                  xorcheck = xorcheck ^ input[data_packet_start + i];
+                  if (frameXorValid(kLength88))
+                  {
+                    frame_length = kLength88;
+                  }
+                  else if (frameXorValid(kLength63))
+                  {
+                    frame_length = kLength63;
+                  }
+                  else
+                  {
+                    // Header matched but checksum failed for both known frame lengths.
+                    input.erase(0, 1);
+                    continue;
+                  }
+                }
+                else
+                {
+                  // In [63, 87] bytes, only 63-byte frame can be fully validated.
+                  if (frameXorValid(kLength63))
+                  {
+                    frame_length = kLength63;
+                  }
+                  else
+                  {
+                    // Could be an incomplete 88-byte frame; wait for more bytes.
+                    break;
+                  }
                 }
 
-                if (input[data_packet_start + Length - 1] == xorcheck)
+                if (frame_length > 0)
                 {
+                  type32_updated_this_frame = false;
+
                   // get RPY
                   short int roll =
                       ((0xff & (char)input[data_packet_start + 4]) << 8) |
@@ -155,6 +262,10 @@ int main(int argc, char **argv)
                   temp = (short int *)&yaw;
                   float yawf = (*temp) * (360.0 / 32768) * (M_PI / 180.0) * -1.0;
 
+                  const double roll_deg = rollf * 180.0 / M_PI;
+                  const double pitch_deg = pitchf * 180.0 / M_PI;
+                  const double yaw_deg = yawf * 180.0 / M_PI;
+
                   // get gyro values
                   short int gx =
                       ((0xff & (char)input[data_packet_start + 10]) << 8) |
@@ -172,6 +283,10 @@ int main(int argc, char **argv)
                   float gyf = (*temp) * 300.0 / 32768 * (M_PI / 180.0); 
                   temp = (short int *)&gz;
                   float gzf = (*temp) * 300.0 / 32768 * (M_PI / 180.0); 
+
+                  const double gx_deg = gxf * 180.0 / M_PI;
+                  const double gy_deg = gyf * 180.0 / M_PI;
+                  const double gz_deg = gzf * 180.0 / M_PI;
 
                   // get acelerometer values
                   short int ax =
@@ -250,7 +365,7 @@ int main(int argc, char **argv)
                   double gpsTimeMilliseconds = gpsTime * 0.00025;
 
                   // 轮询数据解析
-                  char type = (0xff & (char)input[data_packet_start + 56]);
+                  uint8_t type = (0xff & (char)input[data_packet_start + 56]);
                   int16_t Data1 =
                       ((0xff & (char)input[data_packet_start + 47]) << 8) |
                       (0xff & (char)input[data_packet_start + 46]);
@@ -289,6 +404,21 @@ int main(int argc, char **argv)
                     double roll_std = std::exp(Data1 / 100.0);
                     double pitch_std = std::exp(Data2 / 100.0);
                     double yaw_std = std::exp(Data3 / 100.0);
+
+                    // Protocol provides attitude std; fill IMU orientation covariance.
+                    const double roll_std_rad = roll_std * (M_PI / 180.0);
+                    const double pitch_std_rad = pitch_std * (M_PI / 180.0);
+                    const double yaw_std_rad = yaw_std * (M_PI / 180.0);
+                    imu.orientation_covariance[0] = roll_std_rad * roll_std_rad;
+                    imu.orientation_covariance[1] = 0.0;
+                    imu.orientation_covariance[2] = 0.0;
+                    imu.orientation_covariance[3] = 0.0;
+                    imu.orientation_covariance[4] = pitch_std_rad * pitch_std_rad;
+                    imu.orientation_covariance[5] = 0.0;
+                    imu.orientation_covariance[6] = 0.0;
+                    imu.orientation_covariance[7] = 0.0;
+                    imu.orientation_covariance[8] = yaw_std_rad * yaw_std_rad;
+
                     ROS_DEBUG("Attitude STD - R: %f, P: %f, Y: %f", roll_std, pitch_std, yaw_std);
                     break;
                   }
@@ -310,29 +440,28 @@ int main(int argc, char **argv)
                     case 32:
                     case 33:
                     case 34:
-                    case 48:
-                    case 49:
+                    case 48: gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_GBAS_FIX; break;
+                    case 49: gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_GBAS_FIX; break;
                     case 50: gps_msg.status.status = sensor_msgs::NavSatStatus::STATUS_GBAS_FIX; break;
                     default: break;
                     }
                     std_msgs::UInt8 sat_msg;
                     sat_msg.data = static_cast<uint8_t>(Data2);
+                    last_sat_count = sat_msg.data;
+                    type32_diff_pos_status = static_cast<int>(Data1);
+                    type32_diff_heading_status = static_cast<int>(Data3);
+                    type32_updated_this_frame = true;
                     sat_pub.publish(sat_msg);
-                    break;
-                  }
-                  case 33:
-                  {
-                    // 【新增】轮速状态 (解析保留不发布)
-                    bool has_wheel_speed = (Data1 != 0);
-                    ROS_DEBUG("Wheel Speed Status: %d", has_wheel_speed);
                     break;
                   }
                   default:
                     break;
                   }
 
-                  // 【新增】高精度经纬度 (毫米级精度, 解析保留不发布)
-                  int64_t hp_lat_raw =
+                    if (frame_length == kLength88)
+                    {
+                    // 88-byte extension fields: high-precision GNSS + no-gravity acceleration.
+                    int64_t hp_lat_raw =
                       ((int64_t)(0xff & input[data_packet_start + 70]) << 56) |
                       ((int64_t)(0xff & input[data_packet_start + 69]) << 48) |
                       ((int64_t)(0xff & input[data_packet_start + 68]) << 40) |
@@ -341,8 +470,8 @@ int main(int argc, char **argv)
                       ((int64_t)(0xff & input[data_packet_start + 65]) << 16) |
                       ((int64_t)(0xff & input[data_packet_start + 64]) << 8) |
                       ((int64_t)(0xff & input[data_packet_start + 63]));
-                      
-                  int64_t hp_lon_raw =
+
+                    int64_t hp_lon_raw =
                       ((int64_t)(0xff & input[data_packet_start + 78]) << 56) |
                       ((int64_t)(0xff & input[data_packet_start + 77]) << 48) |
                       ((int64_t)(0xff & input[data_packet_start + 76]) << 40) |
@@ -352,21 +481,19 @@ int main(int argc, char **argv)
                       ((int64_t)(0xff & input[data_packet_start + 72]) << 8) |
                       ((int64_t)(0xff & input[data_packet_start + 71]));
 
-                  double high_prec_lat = hp_lat_raw * 1e-8;
-                  double high_prec_lon = hp_lon_raw * 1e-8;
-                  ROS_DEBUG("High Precision Lat: %.8f, Lon: %.8f", high_prec_lat, high_prec_lon);
+                    double high_prec_lat = hp_lat_raw * 1e-8;
+                    double high_prec_lon = hp_lon_raw * 1e-8;
+                    ROS_DEBUG("High Precision Lat: %.8f, Lon: %.8f", high_prec_lat, high_prec_lon);
 
-                  // 【新增】去重力加速度 (解析保留不发布)
-                  short int ax_no_grav = ((0xff & (char)input[data_packet_start + 81]) << 8) | (0xff & (char)input[data_packet_start + 80]);
-                  short int ay_no_grav = ((0xff & (char)input[data_packet_start + 83]) << 8) | (0xff & (char)input[data_packet_start + 82]);
-                  short int az_no_grav = ((0xff & (char)input[data_packet_start + 85]) << 8) | (0xff & (char)input[data_packet_start + 84]);
-                  
-                  float ax_nograv_f = ax_no_grav * 12.0 / 32768 * gravity_acceleration;
-                  float ay_nograv_f = ay_no_grav * 12.0 / 32768 * gravity_acceleration;
-                  float az_nograv_f = az_no_grav * 12.0 / 32768 * gravity_acceleration;
-                  ROS_DEBUG("No-Grav Accel X: %f, Y: %f, Z: %f", ax_nograv_f, ay_nograv_f, az_nograv_f);
+                    short int ax_no_grav = ((0xff & (char)input[data_packet_start + 81]) << 8) | (0xff & (char)input[data_packet_start + 80]);
+                    short int ay_no_grav = ((0xff & (char)input[data_packet_start + 83]) << 8) | (0xff & (char)input[data_packet_start + 82]);
+                    short int az_no_grav = ((0xff & (char)input[data_packet_start + 85]) << 8) | (0xff & (char)input[data_packet_start + 84]);
 
-                  received_message = true;
+                    float ax_nograv_f = ax_no_grav * 12.0 / 32768 * gravity_acceleration;
+                    float ay_nograv_f = ay_no_grav * 12.0 / 32768 * gravity_acceleration;
+                    float az_nograv_f = az_no_grav * 12.0 / 32768 * gravity_acceleration;
+                    ROS_DEBUG("No-Grav Accel X: %f, Y: %f, Z: %f", ax_nograv_f, ay_nograv_f, az_nograv_f);
+                    }
 
                   uint32_t gpsWeek =
                       ((0xff & (char)input[data_packet_start + 61]) << 24) |
@@ -379,6 +506,8 @@ int main(int argc, char **argv)
                   {
                     measurement_time = convertGPSTimeToROSTime((int)gpsWeek, gpsTimeMilliseconds);
                   }
+
+                  const ros::Time gps_utc_time = convertGPSTimeToROSTime((int)gpsWeek, gpsTimeMilliseconds);
 
                   const double cr = std::cos(rollf * 0.5);
                   const double sr = std::sin(rollf * 0.5);
@@ -430,18 +559,40 @@ int main(int argc, char **argv)
                   {
                     ROS_WARN_THROTTLE(1.0, "GPS data jumped. Skipping publication for this frame.");
                   }
+
+                  if (debug_display)
+                  {
+                    std::ostringstream dbg;
+                    dbg << std::fixed << std::setprecision(4)
+                        << "Euler(deg): roll=" << roll_deg << ", pitch=" << pitch_deg << ", yaw=" << yaw_deg << "\n"
+                        << "Angular Rate(deg/s): gx=" << gx_deg << ", gy=" << gy_deg << ", gz=" << gz_deg << "\n"
+                        << "Acceleration(m/s^2): ax=" << axf << ", ay=" << ayf << ", az=" << azf << "\n"
+                        << "GNSS Time(UTC): week=" << gpsWeek << ", tow_s=" << gpsTimeMilliseconds
+                        << ", time=" << formatRosTimeUTC(gps_utc_time) << "\n"
+                        << "LLA: lat=" << latitudef << ", lon=" << longitudef << ", alt=" << altitudef << "\n"
+                        << "Satellites: " << static_cast<int>(last_sat_count) << "\n";
+                    if (type32_updated_this_frame)
+                    {
+                      dbg << "Diff Status(Type=32): pos=" << type32_diff_pos_status << " " << type32DiffStatusToString(type32_diff_pos_status)
+                          << ", heading=" << type32_diff_heading_status << " " << type32DiffStatusToString(type32_diff_heading_status);
+                    }
+                    else
+                    {
+                      // dbg << "Diff Status(Type=32): no update in this frame";
+                    }
+                    ROS_INFO_STREAM(dbg.str());
+                  }
                 }
                 else
                 {
-                  ROS_INFO("xorcheck error");
+                  ROS_DEBUG("xorcheck error");
                 }
-                // 清理已处理完的整个包 (88 字节)
-                input.erase(0, data_packet_start + Length); 
+                input.erase(0, data_packet_start + frame_length);
               }
               else
               {
-                // 清理假帧头
-                input.erase(0, data_packet_start + 1); 
+                // 清理假帧头，继续向后搜索下一字节。
+                input.erase(0, 1);
               }
             }
             else
@@ -457,7 +608,7 @@ int main(int argc, char **argv)
         {
           ser.setPort(port);
           ser.setBaudrate(buadrate);
-          serial::Timeout to = serial::Timeout::simpleTimeout(1000);
+          serial::Timeout to = serial::Timeout::simpleTimeout(20);
           ser.setTimeout(to);
           ser.open();
         }

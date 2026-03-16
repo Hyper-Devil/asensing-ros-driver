@@ -1,5 +1,7 @@
 <launch>
 
+  <arg name="debug_display" default="false"/>
+
   <node pkg="asensing-ros-driver" type="asensing_node" name="asensing_node" required="true" output="screen">
     <param name="port" value="/dev/ttyUSB0"/>
     <param name="buadrate" type="int" value="460800"/>
@@ -7,6 +9,7 @@
     <param name="frame_id" type="str" value="base_link"/>
     <param name="gravity_acceleration" type="double" value="9.7883105"/>
     <param name="use_gps_time" type="bool" value="false"/>
+    <param name="debug_display" type="bool" value="$(arg debug_display)"/>
     <param name="broadcast_tf" type="bool" value="false"/>
     <param name="tf_parent_frame_id" type="str" value="world"/>
     <param name="tf_frame_id" type="str" value="base_link"/>

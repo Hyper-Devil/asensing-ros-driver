@@ -1,30 +1,93 @@
 # asensing-ros-driver
 
-组合惯导ros驱动
+组合惯导 ROS 驱动（当前版本仅适配 INS5711DAA）。
+
+## 支持范围
+
+- 已适配设备：INS5711DAA
+- 协议：BD DB 0B 帧头
+- 帧长：优先解析 88 字节，兼容 63 字节帧
+- 校验：仅使用整帧 XOR 校验
+
+说明：`ins570d.launch` 仍在仓库中，但当前解析实现已按 5711 协议演进，不保证 570 可直接使用。
+
+## 运行方式
+
+```bash
+source /root/catkin_ws/devel/setup.bash
+roslaunch asensing-ros-driver ins5711DAA.launch
+```
+
+开启调试打印：
+
+```bash
+roslaunch asensing-ros-driver ins5711DAA.launch debug_display:=true
+```
+## 重要提醒
+
+- 目前安装方式为吊装，且未通过SDK进行安装参数的写入。目前仅pitch和yaw需要取反，其他数据都不需要。室内测试通过。
+
+## 发布话题
+
+- `/imu/data` (`sensor_msgs/Imu`)
+- `/imu/gps` (`sensor_msgs/NavSatFix`)
+- `/imu/temperature` (`std_msgs/Float32`)
+- `/imu/satellites` (`std_msgs/UInt8`)
 
 ## 时间戳逻辑
 
-驱动在解析每一帧串口数据后，会先生成统一时间戳 `measurement_time`，再将其写入本帧所有已发布消息：
+驱动在解析每一帧串口数据后，先生成统一时间戳 `measurement_time`，并用于本帧发布消息的 `header.stamp`。
 
-- `sensor_msgs/Imu` (`/imu/data`)
-- `sensor_msgs/Temperature` (`/imu/temperature`)
-- `sensor_msgs/NavSatFix` (`/imu/gps`)
-
-`measurement_time` 计算规则：
+计算规则：
 
 1. 默认使用系统时间：`ros::Time::now()`
-2. 当 `use_gps_time=true` 且 `gpsWeek > 0` 时，使用 GPS 时间：
-	`convertGPSTimeToROSTime(gpsWeek, gpsTimeSeconds)`
+2. 当 `use_gps_time=true` 且 `gpsWeek > 0` 且 `gpsTimeSeconds > 0` 时，使用 GPS 时间：
+   `convertGPSTimeToROSTime(gpsWeek, gpsTimeSeconds)`
 
-其中 `gpsTimeSeconds` 来自设备包内的 GPS 时间字段换算。
+作用：
 
-## measurement_time 的作用
+- 保证同一帧 IMU/GPS 时间一致
+- 便于在系统时间和 GPS 时间之间切换
+- 提高下游时间同步与融合（如 EKF）一致性
 
-- 保证同一帧 IMU/GPS 的 `header.stamp` 一致
-- 方便在“系统时间”和“GPS时间”之间切换，而不需要在每个发布点重复判断逻辑
-- 提高下游时间同步与融合（如 EKF）的一致性
+## 参数说明（ins5711DAA.launch）
 
-## 相关参数
-
-- `device_model` (string, 例如 `ins570d` / `ins5711daa`)：设备型号选择，用于后续按型号区分位定义与解析逻辑
+- `port` (string, 默认 `/dev/ttyUSB0`)：串口设备
+- `buadrate` (int, 默认 `460800`)：串口波特率
+- `device_model` (string, 默认 `ins5711daa`)：设备型号标识
+- `frame_id` (string, 默认 `base_link`)：IMU 消息坐标系
+- `gravity_acceleration` (double, 默认 `9.7883105`)：重力加速度换算系数
 - `use_gps_time` (bool, 默认 `false`)：是否优先使用 GPS 时间戳
+- `debug_display` (bool, 默认 `false`)：是否输出逐帧调试信息
+
+## 调试输出内容（debug_display=true）
+
+终端会输出英文调试信息（浮点统一 4 位小数）：
+
+- Euler(deg)
+- Angular Rate(deg/s)
+- Acceleration(m/s^2)
+- GNSS Time(UTC)
+- LLA(lat/lon/alt)
+- Satellites
+- Diff Status(Type=32)
+
+注意：差分状态释义只在当前帧轮询类型 `Type=32` 时更新并打印。
+
+## 解析与鲁棒性说明
+
+- 严格帧头匹配：`0xBD 0xDB 0x0B`
+- 防越界策略：仅在缓冲区长度满足帧长后读取字段
+- 88/63 双长度校验回退：避免因设备输出模式差异导致“有串口数据但无发布”
+
+## 已知限制
+
+- 当前代码路径以 INS5711DAA 为主，其他型号未做完整回归测试
+- 局部校验位（57/62/79）未启用，仅使用全局 XOR
+- 部分扩展字段仅解析用于调试，未额外发布独立话题
+
+## 后续扩展建议
+
+- 将 570/5711 的位定义与解析逻辑分离为独立解析器
+- 增加模型级配置（帧长、字段映射、状态释义表）
+- 为 Type 轮询数据增加独立诊断话题
