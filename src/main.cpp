@@ -105,6 +105,7 @@ int main(int argc, char **argv)
   double gravity_acceleration;
   bool use_gps_time;
   bool debug_display;
+  double time_error_threshold;
   int data_packet_start;
 
   ros::init(argc, argv, "asensing");
@@ -119,6 +120,7 @@ int main(int argc, char **argv)
                                     gravity_acceleration, 9.7883105);
   private_node_handle.param<bool>("use_gps_time", use_gps_time, false);
   private_node_handle.param<bool>("debug_display", debug_display, false);
+  private_node_handle.param<double>("time_error_threshold", time_error_threshold, 0.01);
 
   ROS_INFO_STREAM("Device model: " << device_model);
 
@@ -131,8 +133,6 @@ int main(int argc, char **argv)
 
   ros::ServiceServer service =
       nh.advertiseService("set_zero_orientation", set_zero_orientation);
-
-  ros::Rate r(1000); // Higher polling rate lowers serial-read scheduling latency.
 
   sensor_msgs::Imu imu;
   imu.orientation_covariance[0] = -1.0;
@@ -150,6 +150,7 @@ int main(int argc, char **argv)
   uint8_t xorcheck = 0;
 
   uint8_t last_sat_count = 0;
+  const uint8_t kMinSatForGpsTime = 10;
   int type32_diff_pos_status = 0;
   int type32_diff_heading_status = 0;
   bool type32_updated_this_frame = false;
@@ -157,15 +158,22 @@ int main(int argc, char **argv)
   const int kLength88 = 88;
   const int kLength63 = 63;
   
+  // 用于监测GPS时间跳变的变量
+  int time_monitor_frame_count = 0;
+  ros::Time last_sys_time;
+  ros::Time last_gps_time_for_monitor;
+  bool time_monitor_initialized = false;
+  
   while (ros::ok())
   {
     try
     {
       if (ser.isOpen())
       {
-        if (ser.available())
+        size_t bytes_to_read = ser.available() > 0 ? ser.available() : 1;
+        read = ser.read(bytes_to_read);
+        if (!read.empty())
         {
-          read = ser.read(ser.available());
           ROS_DEBUG("read %i new characters from serial port, adding to %i characters of old input.",
                     (int)read.size(), (int)input.size());
           input += read;
@@ -241,6 +249,9 @@ int main(int argc, char **argv)
 
                 if (frame_length > 0)
                 {
+                  // 在确认帧有效后立刻获取上位机时间，减小解析过程带来的时间延迟
+                  ros::Time measurement_time = ros::Time::now();
+
                   type32_updated_this_frame = false;
 
                   // get RPY
@@ -501,13 +512,53 @@ int main(int argc, char **argv)
                       ((0xff & (char)input[data_packet_start + 59]) << 8) |
                       (0xff & (char)input[data_packet_start + 58]);
 
-                  ros::Time measurement_time = ros::Time::now();
-                  if (use_gps_time && gpsWeek > 0 && gpsTimeMilliseconds > 0)
-                  {
-                    measurement_time = convertGPSTimeToROSTime((int)gpsWeek, gpsTimeMilliseconds);
-                  }
-
                   const ros::Time gps_utc_time = convertGPSTimeToROSTime((int)gpsWeek, gpsTimeMilliseconds);
+                  
+                  if (use_gps_time && gpsWeek > 2400 && gpsTimeMilliseconds > 0)
+                  {
+                    if (last_sat_count < kMinSatForGpsTime)
+                    {
+                      ROS_WARN_THROTTLE(5.0,
+                                        "GPS时间已启用，但当前卫星数过低: %u (< %u)。时间戳稳定性可能受影响。",
+                                        static_cast<unsigned int>(last_sat_count),
+                                        static_cast<unsigned int>(kMinSatForGpsTime));
+                    }
+
+                    // 监测GPS时间跳变
+                    if (!time_monitor_initialized)
+                    {
+                      last_sys_time = measurement_time;
+                      last_gps_time_for_monitor = gps_utc_time;
+                      time_monitor_initialized = true;
+                    }
+                    else
+                    {
+                      time_monitor_frame_count++;
+                      if (time_monitor_frame_count >= 100)
+                      {
+                        double delta_sys = (measurement_time - last_sys_time).toSec();
+                        double delta_gps = (gps_utc_time - last_gps_time_for_monitor).toSec();
+                        
+                        // 防止除以0
+                        if (std::abs(delta_sys) > 1e-5)
+                        {
+                          double error_ratio = std::abs(delta_gps - delta_sys) / std::abs(delta_sys);
+                          // 检查误差是否大于阈值，或者GPS时间是否发生倒退或不合理跳跃
+                          if (error_ratio > time_error_threshold || delta_gps < 0.0)
+                          {
+                            ROS_WARN("GPS时间异常! 100帧内GPS时间流逝: %.4fs, 系统时间流逝: %.4fs, 误差比例: %.2f%% (阈值: %.2f%%)", 
+                                     delta_gps, delta_sys, error_ratio * 100.0, time_error_threshold * 100.0);
+                          }
+                        }
+                        
+                        last_sys_time = measurement_time;
+                        last_gps_time_for_monitor = gps_utc_time;
+                        time_monitor_frame_count = 0;
+                      }
+                    }
+
+                    measurement_time = gps_utc_time;
+                  }
 
                   const double cr = std::cos(rollf * 0.5);
                   const double sr = std::sin(rollf * 0.5);
@@ -543,22 +594,11 @@ int main(int argc, char **argv)
                   imu_pub.publish(imu);
 
                   gps_msg.header.stamp = measurement_time;
-                  gps_msg.header.frame_id = "world";
-                  bool gps_jumped = (gps_msg.longitude != 0.0 && gps_msg.latitude != 0.0) &&
-                                    (std::abs(gps_msg.altitude - altitudef) > 20.0 ||
-                                     std::abs(gps_msg.longitude - longitudef) > 20.0 ||
-                                     std::abs(gps_msg.latitude - latitudef) > 20.0);
-                  if (!gps_jumped)
-                  {
-                    gps_msg.latitude = latitudef;
-                    gps_msg.longitude = longitudef;
-                    gps_msg.altitude = altitudef;
-                    imu_gps_pub.publish(gps_msg);
-                  }
-                  else
-                  {
-                    ROS_WARN_THROTTLE(1.0, "GPS data jumped. Skipping publication for this frame.");
-                  }
+                  gps_msg.header.frame_id = frame_id;
+                  gps_msg.latitude = latitudef;
+                  gps_msg.longitude = longitudef;
+                  gps_msg.altitude = altitudef;
+                  imu_gps_pub.publish(gps_msg);
 
                   if (debug_display)
                   {
@@ -608,7 +648,7 @@ int main(int argc, char **argv)
         {
           ser.setPort(port);
           ser.setBaudrate(buadrate);
-          serial::Timeout to = serial::Timeout::simpleTimeout(20);
+          serial::Timeout to = serial::Timeout::simpleTimeout(15);
           ser.setTimeout(to);
           ser.open();
         }
@@ -630,6 +670,5 @@ int main(int argc, char **argv)
       ser.close();
     }
     ros::spinOnce();
-    r.sleep();
   }
 }
