@@ -14,6 +14,10 @@
 ## 运行方式
 
 ```bash
+apt-get install -y ros-noetic-serial
+```
+
+```bash
 source /root/catkin_ws/devel/setup.bash
 roslaunch asensing-ros-driver ins5711DAA.launch
 ```
