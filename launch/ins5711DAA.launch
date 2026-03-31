@@ -1,6 +1,6 @@
 <launch>
 
-  <arg name="debug_display" default="false"/>
+  <arg name="debug_display" default="true"/>
 
   <node pkg="asensing-ros-driver" type="asensing_node" name="asensing_node" required="true" output="screen">
     <param name="port" value="/dev/ttyUSB0"/>

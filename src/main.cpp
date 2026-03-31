@@ -118,7 +118,7 @@ int main(int argc, char **argv)
                                          "ins5711daa");
   private_node_handle.param<double>("gravity_acceleration",
                                     gravity_acceleration, 9.7883105);
-  private_node_handle.param<bool>("use_gps_time", use_gps_time, false);
+  private_node_handle.param<bool>("use_gps_time", use_gps_time, true);
   private_node_handle.param<bool>("debug_display", debug_display, false);
   private_node_handle.param<double>("time_error_threshold", time_error_threshold, 0.01);
 
@@ -154,6 +154,7 @@ int main(int argc, char **argv)
   int type32_diff_pos_status = 0;
   int type32_diff_heading_status = 0;
   bool type32_updated_this_frame = false;
+  bool type32_ever_received = false;
   
   const int kLength88 = 88;
   const int kLength63 = 63;
@@ -265,13 +266,13 @@ int main(int argc, char **argv)
                       ((0xff & (char)input[data_packet_start + 8]) << 8) |
                       (0xff & (char)input[data_packet_start + 7]);
                   
-                  // 只有这里需要调整坐标轴
+                  // 如果吊装只有pitch yaw需要调整坐标轴
                   short int *temp = (short int *)&roll;
                   float rollf = (*temp) * (360.0 / 32768) * (M_PI / 180.0);
                   temp = (short int *)&pitch;
-                  float pitchf = (*temp) * (360.0 / 32768) * (M_PI / 180.0) * -1.0;
+                  float pitchf = (*temp) * (360.0 / 32768) * (M_PI / 180.0);
                   temp = (short int *)&yaw;
-                  float yawf = (*temp) * (360.0 / 32768) * (M_PI / 180.0) * -1.0;
+                  float yawf = (*temp) * (360.0 / 32768) * (M_PI / 180.0);
 
                   const double roll_deg = rollf * 180.0 / M_PI;
                   const double pitch_deg = pitchf * 180.0 / M_PI;
@@ -340,6 +341,8 @@ int main(int argc, char **argv)
                   double longitudef = *tempA * 1e-7L;
                   tempA = (int *)&altitude;
                   double altitudef = *tempA * 1e-3L;
+                  double high_prec_lat = latitudef;
+                  double high_prec_lon = longitudef;
 
                   // 【新增】解析偏移 39: INS 状态
                   uint8_t ins_status = (0xff & (char)input[data_packet_start + 39]);
@@ -462,6 +465,7 @@ int main(int argc, char **argv)
                     type32_diff_pos_status = static_cast<int>(Data1);
                     type32_diff_heading_status = static_cast<int>(Data3);
                     type32_updated_this_frame = true;
+                    type32_ever_received = true;
                     sat_pub.publish(sat_msg);
                     break;
                   }
@@ -492,8 +496,8 @@ int main(int argc, char **argv)
                       ((int64_t)(0xff & input[data_packet_start + 72]) << 8) |
                       ((int64_t)(0xff & input[data_packet_start + 71]));
 
-                    double high_prec_lat = hp_lat_raw * 1e-8;
-                    double high_prec_lon = hp_lon_raw * 1e-8;
+                    high_prec_lat = hp_lat_raw * 1e-8;
+                    high_prec_lon = hp_lon_raw * 1e-8;
                     ROS_DEBUG("High Precision Lat: %.8f, Lon: %.8f", high_prec_lat, high_prec_lon);
 
                     short int ax_no_grav = ((0xff & (char)input[data_packet_start + 81]) << 8) | (0xff & (char)input[data_packet_start + 80]);
@@ -595,8 +599,12 @@ int main(int argc, char **argv)
 
                   gps_msg.header.stamp = measurement_time;
                   gps_msg.header.frame_id = frame_id;
-                  gps_msg.latitude = latitudef;
-                  gps_msg.longitude = longitudef;
+                    const bool use_high_prec_ll_for_pub =
+                      (type32_diff_pos_status == 48) ||
+                      (type32_diff_pos_status == 49) ||
+                      (type32_diff_pos_status == 50);
+                    gps_msg.latitude = use_high_prec_ll_for_pub ? high_prec_lat : latitudef;
+                    gps_msg.longitude = use_high_prec_ll_for_pub ? high_prec_lon : longitudef;
                   gps_msg.altitude = altitudef;
                   imu_gps_pub.publish(gps_msg);
 
@@ -604,21 +612,37 @@ int main(int argc, char **argv)
                   {
                     std::ostringstream dbg;
                     dbg << std::fixed << std::setprecision(4)
+                        << "INS Init Status: raw=" << static_cast<int>(ins_status)
+                        << ", Pos=" << (pos_initialized ? "Init" : "NotInit")
+                        << ", Vel=" << (vel_initialized ? "Init" : "NotInit")
+                        << ", Att=" << (att_initialized ? "Init" : "NotInit")
+                        << ", Head=" << (head_initialized ? "Init" : "NotInit") << "\n"
                         << "Euler(deg): roll=" << roll_deg << ", pitch=" << pitch_deg << ", yaw=" << yaw_deg << "\n"
                         << "Angular Rate(deg/s): gx=" << gx_deg << ", gy=" << gy_deg << ", gz=" << gz_deg << "\n"
                         << "Acceleration(m/s^2): ax=" << axf << ", ay=" << ayf << ", az=" << azf << "\n"
                         << "GNSS Time(UTC): week=" << gpsWeek << ", tow_s=" << gpsTimeMilliseconds
                         << ", time=" << formatRosTimeUTC(gps_utc_time) << "\n"
                         << "LLA: lat=" << latitudef << ", lon=" << longitudef << ", alt=" << altitudef << "\n"
+                        << "High Prec LL: lat=" << high_prec_lat << ", lon=" << high_prec_lon << "\n"
                         << "Satellites: " << static_cast<int>(last_sat_count) << "\n";
                     if (type32_updated_this_frame)
                     {
                       dbg << "Diff Status(Type=32): pos=" << type32_diff_pos_status << " " << type32DiffStatusToString(type32_diff_pos_status)
-                          << ", heading=" << type32_diff_heading_status << " " << type32DiffStatusToString(type32_diff_heading_status);
+                          << ", heading=" << type32_diff_heading_status << " " << type32DiffStatusToString(type32_diff_heading_status)
+                          << " [updated_this_frame]";
                     }
                     else
                     {
-                      // dbg << "Diff Status(Type=32): no update in this frame";
+                      if (type32_ever_received)
+                      {
+                        dbg << "Diff Status(Type=32): pos=" << type32_diff_pos_status << " " << type32DiffStatusToString(type32_diff_pos_status)
+                            << ", heading=" << type32_diff_heading_status << " " << type32DiffStatusToString(type32_diff_heading_status)
+                            << " [cached_last_value]";
+                      }
+                      else
+                      {
+                        dbg << "Diff Status(Type=32): N/A [waiting_first_update]";
+                      }
                     }
                     ROS_INFO_STREAM(dbg.str());
                   }

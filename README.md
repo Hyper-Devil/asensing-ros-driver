@@ -18,14 +18,15 @@ source /root/catkin_ws/devel/setup.bash
 roslaunch asensing-ros-driver ins5711DAA.launch
 ```
 
-开启调试打印：
+关闭调试打印：
 
 ```bash
-roslaunch asensing-ros-driver ins5711DAA.launch debug_display:=true
+roslaunch asensing-ros-driver ins5711DAA.launch debug_display:=false
 ```
 ## 重要提醒
 
-- 目前安装方式为吊装，且未通过SDK进行安装参数的写入。目前仅pitch和yaw需要取反，其他数据都不需要。室内测试通过。
+- 目前安装方式为正装，未通过SDK进行安装参数的写入。
+- 如果吊装，仅pitch和yaw需要取反，其他数据都不需要。这个结论测试通过。
 
 ## 发布话题
 
@@ -33,6 +34,11 @@ roslaunch asensing-ros-driver ins5711DAA.launch debug_display:=true
 - `/imu/gps` (`sensor_msgs/NavSatFix`)
 - `/imu/temperature` (`std_msgs/Float32`)
 - `/imu/satellites` (`std_msgs/UInt8`)
+
+`/imu/gps` 经纬度发布规则：
+
+- 默认发布标准经纬度（协议基础字段）
+- 当轮询 `Type=32` 的位置差分状态（Data1）为 `48/49/50` 时，发布高精度经纬度（`high_prec_lat/high_prec_lon`）
 
 ## 时间戳逻辑
 
@@ -57,8 +63,8 @@ roslaunch asensing-ros-driver ins5711DAA.launch debug_display:=true
 - `device_model` (string, 默认 `ins5711daa`)：设备型号标识
 - `frame_id` (string, 默认 `base_link`)：IMU 消息坐标系
 - `gravity_acceleration` (double, 默认 `9.7883105`)：重力加速度换算系数
-- `use_gps_time` (bool, 默认 `false`)：是否优先使用 GPS 时间戳
-- `debug_display` (bool, 默认 `false`)：是否输出逐帧调试信息
+- `use_gps_time` (bool, 默认 `true`)：是否优先使用 GPS 时间戳
+- `debug_display` (bool, 默认 `true`)：是否输出逐帧调试信息
 
 ## 调试输出内容（debug_display=true）
 
@@ -69,6 +75,7 @@ roslaunch asensing-ros-driver ins5711DAA.launch debug_display:=true
 - Acceleration(m/s^2)
 - GNSS Time(UTC)
 - LLA(lat/lon/alt)
+- High Prec LL(lat/lon)
 - Satellites
 - Diff Status(Type=32)
 
@@ -82,12 +89,7 @@ roslaunch asensing-ros-driver ins5711DAA.launch debug_display:=true
 
 ## 已知限制
 
-- 当前代码路径以 INS5711DAA 为主，其他型号未做完整回归测试
+- 当前代码路径以 INS5711DAA 为主，570D未做测试
 - 局部校验位（57/62/79）未启用，仅使用全局 XOR
 - 部分扩展字段仅解析用于调试，未额外发布独立话题
 
-## 后续扩展建议
-
-- 将 570/5711 的位定义与解析逻辑分离为独立解析器
-- 增加模型级配置（帧长、字段映射、状态释义表）
-- 为 Type 轮询数据增加独立诊断话题
