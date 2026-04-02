@@ -8,7 +8,7 @@
     <param name="device_model" type="str" value="ins5711daa"/>
     <param name="frame_id" type="str" value="imu_link"/>
     <param name="gravity_acceleration" type="double" value="9.7883105"/>
-    <param name="use_gps_time" type="bool" value="true"/>
+    <param name="use_gps_time" type="bool" value="false"/>
     <param name="debug_display" type="bool" value="$(arg debug_display)"/>
     <param name="broadcast_tf" type="bool" value="false"/>
   </node>

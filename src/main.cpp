@@ -273,6 +273,20 @@ int main(int argc, char **argv)
                   float pitchf = (*temp) * (360.0 / 32768) * (M_PI / 180.0);
                   temp = (short int *)&yaw;
                   float yawf = (*temp) * (360.0 / 32768) * (M_PI / 180.0);
+                  
+                  // 20260402 正装。但根据ROSREP-103标准，imu的坐标系应该为前左上（FLU）
+                  rollf = rollf;
+                  pitchf = -pitchf;
+                  yawf = M_PI / 2.0 - yawf;
+                  while (yawf > M_PI)
+                  {
+                    yawf -= 2.0 * M_PI;
+                  }
+                  while (yawf <- M_PI)
+                  {
+                    yawf += 2.0 * M_PI;
+                  }
+                  
 
                   const double roll_deg = rollf * 180.0 / M_PI;
                   const double pitch_deg = pitchf * 180.0 / M_PI;
@@ -296,6 +310,12 @@ int main(int argc, char **argv)
                   temp = (short int *)&gz;
                   float gzf = (*temp) * 300.0 / 32768 * (M_PI / 180.0); 
 
+                  // 20260402 正装。但根据ROSREP-103标准，imu的坐标系应该为前左上（FLU）
+                  gxf = gxf;
+                  gyf = -gyf;
+                  gzf = -gzf;
+
+
                   const double gx_deg = gxf * 180.0 / M_PI;
                   const double gy_deg = gyf * 180.0 / M_PI;
                   const double gz_deg = gzf * 180.0 / M_PI;
@@ -310,6 +330,11 @@ int main(int argc, char **argv)
                   short int az =
                       ((0xff & (char)input[data_packet_start + 20]) << 8) |
                       (0xff & (char)input[data_packet_start + 19]);
+
+                  // 20260402 正装。但根据ROSREP-103标准，imu的坐标系应该为前左上（FLU）
+                  ax = ax;
+                  ay = -ay;
+                  az = -az;
 
                   temp = (short int *)&ax;
                   float axf = *temp * 12.0 / 32768 * gravity_acceleration;
@@ -523,7 +548,7 @@ int main(int argc, char **argv)
                     if (last_sat_count < kMinSatForGpsTime)
                     {
                       ROS_WARN_THROTTLE(5.0,
-                                        "GPS时间已启用，但当前卫星数过低: %u (< %u)。时间戳稳定性可能受影响。",
+                                        "LOWER STA. COUNT: %u (< %u)",
                                         static_cast<unsigned int>(last_sat_count),
                                         static_cast<unsigned int>(kMinSatForGpsTime));
                     }
@@ -611,9 +636,8 @@ int main(int argc, char **argv)
                   if (debug_display)
                   {
                     std::ostringstream dbg;
-                    dbg << std::fixed << std::setprecision(4)
-                        << "INS Init Status: raw=" << static_cast<int>(ins_status)
-                        << ", Pos=" << (pos_initialized ? "Init" : "NotInit")
+                    dbg << std::fixed  //<< std::setprecision(4)
+                        << "INS Init Status: Pos=" << (pos_initialized ? "Init" : "NotInit")
                         << ", Vel=" << (vel_initialized ? "Init" : "NotInit")
                         << ", Att=" << (att_initialized ? "Init" : "NotInit")
                         << ", Head=" << (head_initialized ? "Init" : "NotInit") << "\n"
