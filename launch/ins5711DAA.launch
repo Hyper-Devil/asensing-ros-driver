@@ -2,7 +2,7 @@
 
   <arg name="debug_display" default="true"/>
 
-  <node pkg="asensing-ros-driver" type="asensing_node" name="asensing_node" required="true" output="screen">
+  <node pkg="asensing_ros_driver" type="asensing_node" name="asensing_node" required="true" output="screen">
     <param name="port" value="/dev/ttyUSB0"/>
     <param name="buadrate" type="int" value="460800"/>
     <param name="device_model" type="str" value="ins5711daa"/>

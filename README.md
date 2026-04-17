@@ -19,13 +19,13 @@ apt-get install -y ros-noetic-serial
 
 ```bash
 source /root/catkin_ws/devel/setup.bash
-roslaunch asensing-ros-driver ins5711DAA.launch
+roslaunch asensing_ros_driver ins5711DAA.launch
 ```
 
 关闭调试打印：
 
 ```bash
-roslaunch asensing-ros-driver ins5711DAA.launch debug_display:=false
+roslaunch asensing_ros_driver ins5711DAA.launch debug_display:=false
 ```
 
 ## 重要提醒

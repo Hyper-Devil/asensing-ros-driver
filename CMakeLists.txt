@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(asensing-ros-driver)
+project(asensing_ros_driver)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
