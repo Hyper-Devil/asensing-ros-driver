@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   std_srvs
   tf
+  message_generation
 )
 
 
@@ -24,10 +25,20 @@ find_package(catkin REQUIRED COMPONENTS
 ## LIBRARIES: libraries you create in this project that dependent projects also need
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
+add_message_files(
+  FILES
+  InsData.msg
+)
+
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+)
+
 catkin_package(
 #  INCLUDE_DIRS include
-#  LIBRARIES 
-   CATKIN_DEPENDS roscpp geometry_msgs sensor_msgs serial std_msgs std_srvs tf
+#  LIBRARIES
+   CATKIN_DEPENDS roscpp geometry_msgs sensor_msgs serial std_msgs std_srvs tf message_runtime
 #  DEPENDS system_lib
 )
 
@@ -45,7 +56,8 @@ include_directories(
 ## Declare a C++ executable
 
 add_executable(asensing_node src/main.cpp)
-## Specify libraries to link a library or executable target against
+
+add_dependencies(asensing_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 target_link_libraries(asensing_node
   ${catkin_LIBRARIES}
